@@ -1,0 +1,181 @@
+name: Apisyu direct protocol source acquisition
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/apisyu-direct-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -U requests
+      - name: Run Apisyu conversion protocol
+        shell: bash
+        run: |
+          mkdir -p apisyu-direct
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee apisyu-direct/run.log
+          from __future__ import annotations
+          import json, time
+          from pathlib import Path
+          from urllib.parse import urlparse
+          import requests
+
+          OUT = Path('apisyu-direct')
+          PAGE = 'https://apisyu.com/single/mp4/jRYFIV030Gg?video=720&lang=en'
+          API = 'https://apisyu.com/api'
+          session = requests.Session()
+          session.headers.update({
+              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+              'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8',
+          })
+          page = session.get(PAGE, timeout=(15, 60))
+          print('PAGE', page.status_code, len(page.content), page.url)
+          page.raise_for_status()
+          (OUT / 'page.html').write_bytes(page.content)
+          ajax_headers = {
+              'Accept': '*/*',
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'Origin': 'https://apisyu.com',
+              'Referer': PAGE,
+              'X-Requested-With': 'XMLHttpRequest',
+          }
+          base = {'format': 'mp4', 'idyt': 'jRYFIV030Gg', 'quality': '720'}
+          history = []
+
+          def post(acc, **extra):
+              payload = {'acc': acc, **base, **extra}
+              response = session.post(API, data=payload, headers=ajax_headers, timeout=(15, 180))
+              text = response.text.strip()
+              record = {'acc': acc, 'payload': payload, 'status_code': response.status_code, 'text': text[:10000]}
+              history.append(record)
+              print('POST', acc, response.status_code, text[:4000], flush=True)
+              response.raise_for_status()
+              return text
+
+          start_text = post('s')
+          queue = None
+          direct_url = None
+          for attempt in range(1, 101):
+              text = post('v')
+              try:
+                  data = json.loads(text)
+              except Exception:
+                  print('NON-JSON VERIFY', text[:4000])
+                  time.sleep(3)
+                  continue
+              if data.get('e'):
+                  if data.get('status') == 'failed':
+                      print('VERIFY FAILED; restarting', data)
+                      post('s')
+                      time.sleep(3)
+                      continue
+              status = str(data.get('status') or '')
+              print('VERIFY STATUS', attempt, status, data, flush=True)
+              if status == 'completed' and data.get('download'):
+                  direct_url = data['download']
+                  break
+              if status == 'ok':
+                  queue = data.get('queue')
+                  break
+              time.sleep(3)
+          if not direct_url and queue is None:
+              raise RuntimeError('Apisyu verify stage never became ready')
+
+          if not direct_url:
+              generation = None
+              for generation_attempt in range(1, 21):
+                  text = post('g')
+                  try:
+                      data = json.loads(text)
+                  except Exception:
+                      time.sleep(3)
+                      continue
+                  print('GENERATION', generation_attempt, data, flush=True)
+                  if not data.get('e') and data.get('pid'):
+                      generation = data
+                      break
+                  time.sleep(3)
+              if generation is None:
+                  raise RuntimeError('Apisyu did not return a conversion pid')
+              pid = generation['pid']
+              progress_url = 'https://p.lbserver.xyz/api/progress'
+              for progress_attempt in range(1, 241):
+                  response = session.get(
+                      progress_url,
+                      params={'id': pid},
+                      headers={'Referer': PAGE, 'Accept': 'application/json, text/javascript, */*; q=0.01'},
+                      timeout=(15, 90),
+                  )
+                  text = response.text.strip()
+                  record = {'acc': 'progress', 'attempt': progress_attempt, 'pid': pid, 'status_code': response.status_code, 'text': text[:10000]}
+                  history.append(record)
+                  print('PROGRESS', progress_attempt, response.status_code, text[:4000], flush=True)
+                  if response.ok:
+                      try:
+                          data = response.json()
+                      except Exception:
+                          data = {}
+                      state = str(data.get('text') or data.get('status') or '')
+                      if state.lower() == 'finished' and data.get('download_url'):
+                          direct_url = data['download_url']
+                          break
+                      if data.get('download_url') and (data.get('progress') in (100, 1000) or state.lower() in ('completed', 'done')):
+                          direct_url = data['download_url']
+                          break
+                  time.sleep(3)
+              if not direct_url:
+                  raise RuntimeError('Apisyu conversion did not finish within the polling window')
+
+          (OUT / 'protocol-history.json').write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding='utf-8')
+          (OUT / 'direct-url.txt').write_text(str(direct_url), encoding='utf-8')
+          print('DIRECT URL', str(direct_url)[:3000], flush=True)
+          response = session.get(
+              direct_url,
+              headers={'Referer': PAGE, 'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8'},
+              stream=True,
+              timeout=(20, 1800),
+              allow_redirects=True,
+          )
+          print('MEDIA', response.status_code, response.headers.get('content-type'), response.url, flush=True)
+          response.raise_for_status()
+          suffix = Path(urlparse(response.url).path).suffix.lower()
+          if suffix not in ('.mp4', '.mkv', '.webm', '.mov'):
+              suffix = '.mp4'
+          output = OUT / ('source' + suffix)
+          total = 0
+          with output.open('wb') as handle:
+              for chunk in response.iter_content(1024 * 1024):
+                  if chunk:
+                      handle.write(chunk)
+                      total += len(chunk)
+                      if total and total % (20 * 1024 * 1024) < len(chunk):
+                          print(f'DOWNLOADED {total/1024/1024:.1f} MiB', flush=True)
+          print('SAVED', output, total)
+          if total < 100000:
+              raise RuntimeError(f'Downloaded file too small: {total}')
+          PY
+      - name: Inspect
+        if: always()
+        run: |
+          find apisyu-direct -maxdepth 1 -type f -printf '%f %s bytes\n' || true
+          tail -350 apisyu-direct/run.log || true
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jRYFIV030Gg-apisyu-direct-source
+          path: apisyu-direct/**
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: warn
