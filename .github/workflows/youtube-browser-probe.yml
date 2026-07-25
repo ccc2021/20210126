@@ -1,0 +1,100 @@
+name: YouTube browser media probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/youtube-browser-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Inspect installed browser
+        run: |
+          google-chrome --version || chromium --version || true
+          chromedriver --version || true
+
+      - name: Install Selenium
+        run: python -m pip install -U selenium
+
+      - name: Load embedded player and capture media requests
+        shell: bash
+        run: |
+          cat > /tmp/browser_probe.py <<'PY'
+          import json, os, time
+          from pathlib import Path
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+
+          options = Options()
+          options.add_argument('--headless=new')
+          options.add_argument('--no-sandbox')
+          options.add_argument('--disable-dev-shm-usage')
+          options.add_argument('--autoplay-policy=no-user-gesture-required')
+          options.add_argument('--window-size=1280,720')
+          options.add_argument('--lang=zh-TW')
+          options.set_capability('goog:loggingPrefs', {'performance': 'ALL', 'browser': 'ALL'})
+          driver = webdriver.Chrome(options=options)
+          result = {'url': 'https://www.youtube.com/embed/jRYFIV030Gg?autoplay=1&playsinline=1'}
+          try:
+              driver.get(result['url'])
+              time.sleep(12)
+              try:
+                  driver.execute_script("const p=document.getElementById('movie_player'); if(p){p.setPlaybackQualityRange('hd720');p.setPlaybackQuality('hd720');p.playVideo();}")
+              except Exception as exc:
+                  result['quality_error'] = repr(exc)
+              time.sleep(18)
+              result['title'] = driver.title
+              result['current_url'] = driver.current_url
+              result['player'] = driver.execute_script("const p=document.getElementById('movie_player'); return p ? {state:p.getPlayerState(), duration:p.getDuration(), current:p.getCurrentTime(), qualities:p.getAvailableQualityLevels(), data:p.getVideoData()} : null;")
+              result['body_text'] = driver.find_element('tag name','body').text[:3000]
+              entries = driver.execute_script("return performance.getEntriesByType('resource').map(e=>({name:e.name, initiatorType:e.initiatorType, duration:e.duration, transferSize:e.transferSize}));")
+              result['media_entries'] = [e for e in entries if 'googlevideo.com' in e.get('name','') or 'videoplayback' in e.get('name','')]
+              perf = []
+              for item in driver.get_log('performance'):
+                  try:
+                      message = json.loads(item['message'])['message']
+                      if message.get('method') in ('Network.requestWillBeSent','Network.responseReceived'):
+                          params = message.get('params', {})
+                          req = params.get('request', {})
+                          resp = params.get('response', {})
+                          url = req.get('url') or resp.get('url') or ''
+                          if 'googlevideo.com' in url or 'videoplayback' in url:
+                              perf.append({'method': message.get('method'), 'url': url, 'request_headers': req.get('headers'), 'response': resp})
+                  except Exception:
+                      pass
+              result['performance_media'] = perf
+              result['cookies'] = driver.get_cookies()
+              driver.save_screenshot('youtube_browser_probe.png')
+              Path('youtube_page_source.html').write_text(driver.page_source, encoding='utf-8')
+          except Exception as exc:
+              result['error'] = repr(exc)
+          finally:
+              Path('youtube_browser_probe.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+              print(json.dumps({k:v for k,v in result.items() if k not in ('performance_media','cookies')}, ensure_ascii=False, indent=2)[:12000])
+              driver.quit()
+          PY
+          python /tmp/browser_probe.py
+
+      - name: Upload browser probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jRYFIV030Gg-browser-probe
+          path: |
+            youtube_browser_probe.json
+            youtube_browser_probe.png
+            youtube_page_source.html
+          retention-days: 2
+          if-no-files-found: warn
