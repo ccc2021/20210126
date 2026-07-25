@@ -28,37 +28,68 @@ jobs:
       - name: Install Selenium
         run: python -m pip install -U selenium
 
-      - name: Load embedded player and capture media requests
+      - name: Load embedded player with a valid origin and capture media requests
         shell: bash
         run: |
           cat > /tmp/browser_probe.py <<'PY'
-          import json, os, time
+          import json
+          import os
+          import threading
+          import time
+          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
           from pathlib import Path
+
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+
+          webroot = Path('/tmp/youtube-embed-host')
+          webroot.mkdir(parents=True, exist_ok=True)
+          (webroot / 'index.html').write_text('''<!doctype html>
+          <html><head><meta charset="utf-8"><title>YouTube media probe</title></head>
+          <body style="margin:0;background:#000">
+          <iframe id="ytplayer" width="1280" height="720"
+            src="https://www.youtube.com/embed/jRYFIV030Gg?autoplay=1&playsinline=1&enablejsapi=1&origin=http%3A%2F%2F127.0.0.1%3A8765"
+            allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"
+            allowfullscreen></iframe>
+          </body></html>''', encoding='utf-8')
+
+          class QuietHandler(SimpleHTTPRequestHandler):
+              def log_message(self, *args):
+                  pass
+
+          os.chdir(webroot)
+          server = ThreadingHTTPServer(('127.0.0.1', 8765), QuietHandler)
+          thread = threading.Thread(target=server.serve_forever, daemon=True)
+          thread.start()
 
           options = Options()
           options.add_argument('--headless=new')
           options.add_argument('--no-sandbox')
           options.add_argument('--disable-dev-shm-usage')
+          options.add_argument('--disable-blink-features=AutomationControlled')
           options.add_argument('--autoplay-policy=no-user-gesture-required')
-          options.add_argument('--window-size=1280,720')
+          options.add_argument('--window-size=1280,850')
           options.add_argument('--lang=zh-TW')
+          options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36')
+          options.add_experimental_option('excludeSwitches', ['enable-automation'])
           options.set_capability('goog:loggingPrefs', {'performance': 'ALL', 'browser': 'ALL'})
           driver = webdriver.Chrome(options=options)
-          result = {'url': 'https://www.youtube.com/embed/jRYFIV030Gg?autoplay=1&playsinline=1'}
+          result = {'host_url': 'http://127.0.0.1:8765/'}
           try:
-              driver.get(result['url'])
+              driver.get(result['host_url'])
               time.sleep(12)
+              iframe = driver.find_element(By.ID, 'ytplayer')
+              driver.switch_to.frame(iframe)
               try:
                   driver.execute_script("const p=document.getElementById('movie_player'); if(p){p.setPlaybackQualityRange('hd720');p.setPlaybackQuality('hd720');p.playVideo();}")
               except Exception as exc:
                   result['quality_error'] = repr(exc)
-              time.sleep(18)
+              time.sleep(20)
               result['title'] = driver.title
               result['current_url'] = driver.current_url
               result['player'] = driver.execute_script("const p=document.getElementById('movie_player'); return p ? {state:p.getPlayerState(), duration:p.getDuration(), current:p.getCurrentTime(), qualities:p.getAvailableQualityLevels(), data:p.getVideoData()} : null;")
-              result['body_text'] = driver.find_element('tag name','body').text[:3000]
+              result['body_text'] = driver.find_element(By.TAG_NAME, 'body').text[:3000]
               entries = driver.execute_script("return performance.getEntriesByType('resource').map(e=>({name:e.name, initiatorType:e.initiatorType, duration:e.duration, transferSize:e.transferSize}));")
               result['media_entries'] = [e for e in entries if 'googlevideo.com' in e.get('name','') or 'videoplayback' in e.get('name','')]
               perf = []
@@ -76,14 +107,21 @@ jobs:
                       pass
               result['performance_media'] = perf
               result['cookies'] = driver.get_cookies()
-              driver.save_screenshot('youtube_browser_probe.png')
-              Path('youtube_page_source.html').write_text(driver.page_source, encoding='utf-8')
+              driver.save_screenshot(str(Path.cwd() / 'youtube_browser_probe.png'))
+              Path(Path.cwd() / 'youtube_page_source.html').write_text(driver.page_source, encoding='utf-8')
           except Exception as exc:
               result['error'] = repr(exc)
           finally:
-              Path('youtube_browser_probe.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+              driver.switch_to.default_content()
+              output_root = Path(os.environ.get('GITHUB_WORKSPACE', '.'))
+              (output_root / 'youtube_browser_probe.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+              for name in ('youtube_browser_probe.png', 'youtube_page_source.html'):
+                  src = webroot / name
+                  if src.exists():
+                      (output_root / name).write_bytes(src.read_bytes())
               print(json.dumps({k:v for k,v in result.items() if k not in ('performance_media','cookies')}, ensure_ascii=False, indent=2)[:12000])
               driver.quit()
+              server.shutdown()
           PY
           python /tmp/browser_probe.py
 
