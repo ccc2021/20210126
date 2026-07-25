@@ -14,23 +14,38 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe community Cobalt APIs
+      - name: Probe current community Cobalt APIs
         shell: bash
         run: |
           set +e
-          for api in https://cobalt-api.meowing.de https://capi.3kh0.net; do
-            echo "===== GET $api ====="
-            curl -sS -D - -H 'User-Agent: zhko-video-localizer/2.0 (+https://github.com/ccc2021/DC_Video)' "$api/" | head -80
-            for payload in \
-              '{"url":"https://youtu.be/jRYFIV030Gg"}' \
-              '{"url":"https://youtu.be/jRYFIV030Gg","videoQuality":"720"}' \
-              '{"url":"https://youtu.be/jRYFIV030Gg","videoQuality":"720","downloadMode":"auto","youtubeVideoCodec":"h264","youtubeVideoContainer":"mp4"}'; do
-              echo "===== POST $api payload=$payload ====="
-              curl -sS -D - -X POST "$api/" \
-                -H 'User-Agent: zhko-video-localizer/2.0 (+https://github.com/ccc2021/DC_Video)' \
+          UA='zhko-video-localizer/2.0 (+https://github.com/ccc2021/DC_Video)'
+          apis=(
+            https://api.cobalt.liubquanti.click
+            https://nuko-c.meowing.de
+            https://grapefruit.clxxped.lol
+            https://api-cobalt.eversiege.network
+            https://cobalt.alpha.wolfy.love
+            https://cobalt.omega.wolfy.love
+            https://subito-c.meowing.de
+          )
+          urls=(
+            https://youtu.be/jRYFIV030Gg
+            https://www.youtube.com/shorts/jRYFIV030Gg
+            https://music.youtube.com/watch?v=jRYFIV030Gg
+          )
+          for api in "${apis[@]}"; do
+            echo "### API=$api"
+            info=$(curl -L --max-time 20 -sS -H "User-Agent: $UA" "$api/" || true)
+            echo "INFO=$(printf '%s' "$info" | head -c 500)"
+            for url in "${urls[@]}"; do
+              tmp=$(mktemp)
+              code=$(curl -L --max-time 90 -sS -o "$tmp" -w '%{http_code}' -X POST "$api/" \
+                -H "User-Agent: $UA" \
                 -H 'Accept: application/json' \
                 -H 'Content-Type: application/json' \
-                --data "$payload" | head -120
-              echo
+                --data "{\"url\":\"$url\",\"videoQuality\":\"720\",\"downloadMode\":\"auto\",\"youtubeVideoCodec\":\"h264\",\"youtubeVideoContainer\":\"mp4\"}" || true)
+              body=$(cat "$tmp" | tr '\n' ' ' | head -c 1200)
+              rm -f "$tmp"
+              echo "POST url=$url status=$code body=$body"
             done
           done
