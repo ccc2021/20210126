@@ -1,0 +1,20 @@
+name: Actions diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/actions-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Environment check
+        run: |
+          echo "GitHub Actions runner is available"
+          uname -a
+          python3 --version
