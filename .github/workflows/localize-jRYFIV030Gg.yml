@@ -42,7 +42,15 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "yt-dlp[default]" "faster-whisper>=1.1.0" "edge-tts>=7.0.0" "google-genai>=1.0.0" "deep-translator>=1.11.4" "pydub>=0.25.1" "srt>=3.5.3"
+          python -m pip install "yt-dlp[default]" "bgutil-ytdlp-pot-provider>=1.3.1" "requests>=2.32" "faster-whisper>=1.1.0" "edge-tts>=7.0.0" "google-genai>=1.0.0" "deep-translator>=1.11.4" "pydub>=0.25.1" "srt>=3.5.3"
+
+      - name: Start YouTube PO-token provider
+        run: |
+          docker pull brainicism/bgutil-ytdlp-pot-provider:latest
+          docker run --name bgutil-provider -d --init -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest
+          sleep 8
+          docker ps --filter name=bgutil-provider
+          docker logs bgutil-provider || true
 
       - name: Restore localization worker
         run: |
@@ -61,7 +69,8 @@ jobs:
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' 2>/dev/null || true
           find work -maxdepth 2 -type f -printf 'work/%P %s bytes\n' 2>/dev/null | head -100 || true
           test -f output/localization_report.json && cat output/localization_report.json || true
-          tail -120 localization-run.log 2>/dev/null || true
+          tail -160 localization-run.log 2>/dev/null || true
+          docker logs bgutil-provider 2>/dev/null | tail -80 || true
 
       - name: Upload Korean localization package and diagnostics
         if: always()
