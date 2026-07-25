@@ -46,30 +46,34 @@ jobs:
 
       - name: Restore localization worker
         run: |
-          mkdir -p scripts
+          mkdir -p scripts output work
           base64 -d .github/localize_youtube.py.gz.b64 | gzip -d > scripts/localize_youtube.py
           python -m py_compile scripts/localize_youtube.py
 
       - name: Produce Korean subtitles and videos
-        run: python scripts/localize_youtube.py
+        run: |
+          set -o pipefail
+          python scripts/localize_youtube.py 2>&1 | tee localization-run.log
 
       - name: Show result files
         if: always()
         run: |
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' 2>/dev/null || true
+          find work -maxdepth 2 -type f -printf 'work/%P %s bytes\n' 2>/dev/null | head -100 || true
           test -f output/localization_report.json && cat output/localization_report.json || true
+          tail -120 localization-run.log 2>/dev/null || true
 
-      - name: Upload Korean localization package
-        if: success()
+      - name: Upload Korean localization package and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jRYFIV030Gg-korean-localization
           path: |
-            output/target.ko.srt
-            output/source.zh.srt
-            output/korean_subtitled.mp4
-            output/korean_dubbed.mp4
-            output/localization_report.json
+            output/**
+            localization-run.log
+            work/*.srt
+            work/*.vtt
+            work/*.json
           compression-level: 0
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
