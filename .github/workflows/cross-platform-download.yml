@@ -1,0 +1,75 @@
+name: Cross-platform YouTube source download
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/cross-platform-download.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install yt-dlp
+        run: python -m pip install -U "yt-dlp[default]"
+
+      - name: Download public source video
+        shell: bash
+        run: |
+          set +e
+          mkdir -p source-media
+          python - <<'PY' 2>&1 | tee source-media/download.log
+          from pathlib import Path
+          import json
+          from yt_dlp import YoutubeDL
+
+          out = Path('source-media')
+          opts = {
+              'format': 'best[height<=720][ext=mp4]/best[height<=720]/best',
+              'outtmpl': str(out / 'source.%(ext)s'),
+              'noplaylist': True,
+              'writesubtitles': True,
+              'writeautomaticsub': True,
+              'subtitleslangs': ['zh-TW','zh-Hant','zh-CN','zh-Hans','zh'],
+              'subtitlesformat': 'srt/vtt/best',
+              'convertsubtitles': 'srt',
+              'retries': 10,
+              'fragment_retries': 10,
+              'verbose': True,
+              'extractor_args': {'youtube': {'player_client': ['ios','web_safari','android_vr','tv','mweb']}},
+              'http_headers': {
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+                  'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+              },
+          }
+          with YoutubeDL(opts) as ydl:
+              info = ydl.extract_info('https://youtu.be/jRYFIV030Gg', download=True)
+              (out / 'metadata.json').write_text(json.dumps(ydl.sanitize_info(info), ensure_ascii=False, indent=2), encoding='utf-8')
+          PY
+          status=${PIPESTATUS[0]}
+          find source-media -maxdepth 1 -type f -print
+          exit $status
+
+      - name: Upload source or diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jRYFIV030Gg-source-${{ matrix.os }}
+          path: source-media/**
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: warn
