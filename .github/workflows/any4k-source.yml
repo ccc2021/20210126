@@ -1,0 +1,201 @@
+name: Any4K source acquisition
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/any4k-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: python -m pip install -U requests
+
+      - name: Check formats and download source
+        shell: bash
+        run: |
+          mkdir -p any4k-output
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee any4k-output/any4k.log
+          from __future__ import annotations
+
+          import json
+          import re
+          import uuid
+          from pathlib import Path
+          from typing import Any
+          from urllib.parse import urlparse
+
+          import requests
+
+          VIDEO_URL = "https://www.youtube.com/watch?v=jRYFIV030Gg"
+          CHECK_URL = "https://api.any4k.com/v1/dlp/check"
+          DOWNLOAD_URL = "https://api.any4k.com/v1/dlp/download"
+          OUT = Path("any4k-output")
+          DEVICE_ID = str(uuid.uuid4())
+          SESSION = requests.Session()
+          SESSION.headers.update({
+              "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+              "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+          })
+
+          def write_json(name: str, value: Any) -> None:
+              (OUT / name).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          def numeric(value: Any) -> int:
+              if isinstance(value, (int, float)):
+                  return int(value)
+              match = re.search(r"(\d{2,4})", str(value or ""))
+              return int(match.group(1)) if match else 0
+
+          def walk(value: Any, path: str = "root"):
+              if isinstance(value, dict):
+                  yield path, value
+                  for key, child in value.items():
+                      yield from walk(child, f"{path}.{key}")
+              elif isinstance(value, list):
+                  for index, child in enumerate(value):
+                      yield from walk(child, f"{path}[{index}]")
+
+          payload = {
+              "url": VIDEO_URL,
+              "lang": "zh",
+              "country": "TW",
+              "platform": "Web",
+              "deviceId": DEVICE_ID,
+          }
+          response = SESSION.post(CHECK_URL, json=payload, timeout=(20, 180))
+          print("CHECK HTTP", response.status_code)
+          print("CHECK TYPE", response.headers.get("content-type"))
+          print(response.text[:12000])
+          response.raise_for_status()
+          data = response.json()
+          write_json("check-response.json", data)
+
+          candidates = []
+          for path, item in walk(data):
+              if not isinstance(item, dict):
+                  continue
+              format_id = (
+                  item.get("format") or item.get("format_id") or item.get("formatId")
+                  or item.get("id") or item.get("itag")
+              )
+              if format_id is None:
+                  continue
+              ext = str(item.get("ext") or item.get("container") or item.get("format") or "").lower()
+              height = numeric(item.get("height") or item.get("quality") or item.get("resolution") or item.get("label"))
+              vcodec = str(item.get("vcodec") or item.get("videoCodec") or item.get("video_codec") or "")
+              acodec = str(item.get("acodec") or item.get("audioCodec") or item.get("audio_codec") or "")
+              has_video = item.get("hasVideo") is True or item.get("video") is True or vcodec not in {"", "none", "null"} or height > 0
+              has_audio = item.get("hasAudio") is True or item.get("audio") is True or acodec not in {"", "none", "null"}
+              if not has_video:
+                  continue
+              candidates.append({
+                  "path": path,
+                  "format": str(format_id),
+                  "height": height,
+                  "ext": ext,
+                  "has_audio": has_audio,
+                  "raw": item,
+              })
+
+          write_json("format-candidates.json", candidates)
+          if not candidates:
+              raise RuntimeError("Any4K check response contained no recognizable video formats")
+
+          eligible = [x for x in candidates if x["height"] == 0 or x["height"] <= 720] or candidates
+          eligible.sort(key=lambda x: (
+              x["has_audio"],
+              "mp4" in x["ext"],
+              min(x["height"] or 720, 720),
+          ), reverse=True)
+          chosen = eligible[0]
+          print("CHOSEN", json.dumps(chosen, ensure_ascii=False, default=str)[:8000])
+          write_json("chosen-format.json", chosen)
+
+          download_payload = {
+              "url": VIDEO_URL,
+              "format": chosen["format"],
+              "lang": "zh",
+              "country": "TW",
+          }
+          download = SESSION.post(DOWNLOAD_URL, json=download_payload, stream=True, timeout=(20, 600), allow_redirects=True)
+          print("DOWNLOAD HTTP", download.status_code)
+          print("DOWNLOAD TYPE", download.headers.get("content-type"))
+          print("DOWNLOAD URL", download.url)
+          download.raise_for_status()
+
+          content_type = (download.headers.get("content-type") or "").lower()
+          direct_url = None
+          if "json" in content_type or "text/" in content_type:
+              raw = download.content
+              (OUT / "download-response.txt").write_bytes(raw)
+              try:
+                  result = json.loads(raw)
+                  write_json("download-response.json", result)
+                  for path, item in walk(result):
+                      if not isinstance(item, dict):
+                          continue
+                      for key in ("url", "download", "downloadUrl", "download_url", "file", "fileUrl", "file_url"):
+                          value = item.get(key)
+                          if isinstance(value, str) and value.startswith(("http://", "https://")):
+                              direct_url = value
+                              print("DIRECT URL FROM", path, key)
+                              break
+                      if direct_url:
+                          break
+              except Exception:
+                  print(raw[:5000])
+              if not direct_url:
+                  raise RuntimeError("Any4K download endpoint returned text/JSON without a direct media URL")
+              download.close()
+              download = SESSION.get(direct_url, stream=True, timeout=(20, 900), allow_redirects=True)
+              print("DIRECT HTTP", download.status_code, download.headers.get("content-type"), download.url)
+              download.raise_for_status()
+
+          suffix = ".mp4"
+          parsed = urlparse(download.url)
+          path_suffix = Path(parsed.path).suffix.lower()
+          if path_suffix in {".mp4", ".mkv", ".webm", ".mov"}:
+              suffix = path_suffix
+          output = OUT / f"source{suffix}"
+          total = 0
+          with output.open("wb") as handle:
+              for chunk in download.iter_content(chunk_size=1024 * 1024):
+                  if chunk:
+                      handle.write(chunk)
+                      total += len(chunk)
+                      if total // (25 * 1024 * 1024) != (total - len(chunk)) // (25 * 1024 * 1024):
+                          print(f"downloaded {total / 1024 / 1024:.1f} MiB", flush=True)
+          print("SAVED", output, total)
+          if total < 100_000:
+              raise RuntimeError(f"Downloaded media is unexpectedly small: {total} bytes")
+          PY
+
+      - name: Inspect source
+        if: always()
+        run: |
+          find any4k-output -maxdepth 1 -type f -printf '%f %s bytes\n' || true
+          tail -200 any4k-output/any4k.log || true
+
+      - name: Upload source or diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jRYFIV030Gg-any4k-source
+          path: any4k-output/**
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: warn
