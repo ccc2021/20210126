@@ -1,0 +1,75 @@
+name: Localize jRYFIV030Gg to Korean
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/localize-jRYFIV030Gg.yml
+      - .github/localize_youtube.py.gz.b64
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  localize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      VIDEO_URL: https://youtu.be/jRYFIV030Gg
+      WORKDIR: work
+      OUTDIR: output
+      MAX_HEIGHT: "720"
+      WHISPER_MODEL: small
+      KOREAN_VOICE: ko-KR-InJoonNeural
+      GEMINI_MODEL: gemini-2.5-flash
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "yt-dlp[default]" "faster-whisper>=1.1.0" "edge-tts>=7.0.0" "google-genai>=1.0.0" "deep-translator>=1.11.4" "pydub>=0.25.1" "srt>=3.5.3"
+
+      - name: Restore localization worker
+        run: |
+          mkdir -p scripts
+          base64 -d .github/localize_youtube.py.gz.b64 | gzip -d > scripts/localize_youtube.py
+          python -m py_compile scripts/localize_youtube.py
+
+      - name: Produce Korean subtitles and videos
+        run: python scripts/localize_youtube.py
+
+      - name: Show result files
+        if: always()
+        run: |
+          find output -maxdepth 1 -type f -printf '%f %s bytes\n' 2>/dev/null || true
+          test -f output/localization_report.json && cat output/localization_report.json || true
+
+      - name: Upload Korean localization package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jRYFIV030Gg-korean-localization
+          path: |
+            output/target.ko.srt
+            output/source.zh.srt
+            output/korean_subtitled.mp4
+            output/korean_dubbed.mp4
+            output/localization_report.json
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
