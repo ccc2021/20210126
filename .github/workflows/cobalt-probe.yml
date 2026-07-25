@@ -1,0 +1,36 @@
+name: Cobalt API probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/cobalt-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe community Cobalt APIs
+        shell: bash
+        run: |
+          set +e
+          for api in https://cobalt-api.meowing.de https://capi.3kh0.net; do
+            echo "===== GET $api ====="
+            curl -sS -D - -H 'User-Agent: zhko-video-localizer/2.0 (+https://github.com/ccc2021/DC_Video)' "$api/" | head -80
+            for payload in \
+              '{"url":"https://youtu.be/jRYFIV030Gg"}' \
+              '{"url":"https://youtu.be/jRYFIV030Gg","videoQuality":"720"}' \
+              '{"url":"https://youtu.be/jRYFIV030Gg","videoQuality":"720","downloadMode":"auto","youtubeVideoCodec":"h264","youtubeVideoContainer":"mp4"}'; do
+              echo "===== POST $api payload=$payload ====="
+              curl -sS -D - -X POST "$api/" \
+                -H 'User-Agent: zhko-video-localizer/2.0 (+https://github.com/ccc2021/DC_Video)' \
+                -H 'Accept: application/json' \
+                -H 'Content-Type: application/json' \
+                --data "$payload" | head -120
+              echo
+            done
+          done
