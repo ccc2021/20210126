@@ -6,7 +6,7 @@ on:
     paths:
       - .github/workflows/localize-jRYFIV030Gg.yml
       - .github/localize_youtube.py.gz.b64
-      - .github/cobalt_invidious_runner.py
+      - .github/local_cobalt_runner.py
   workflow_dispatch:
 
 permissions:
@@ -51,18 +51,33 @@ jobs:
           docker run --name bgutil-provider -d --init -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider:latest
           sleep 8
           docker ps --filter name=bgutil-provider
-          docker logs bgutil-provider || true
+
+      - name: Start self-hosted Cobalt
+        run: |
+          docker pull ghcr.io/imputnet/cobalt:11
+          docker run --name local-cobalt -d --init -p 9000:9000 \
+            -e API_URL=http://127.0.0.1:9000/ \
+            ghcr.io/imputnet/cobalt:11
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:9000/ >/tmp/cobalt-info.json; then
+              cat /tmp/cobalt-info.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs local-cobalt
+          exit 1
 
       - name: Restore localization worker
         run: |
           mkdir -p scripts output work
           base64 -d .github/localize_youtube.py.gz.b64 | gzip -d > scripts/localize_youtube.py
-          python -m py_compile scripts/localize_youtube.py .github/cobalt_invidious_runner.py
+          python -m py_compile scripts/localize_youtube.py .github/local_cobalt_runner.py
 
       - name: Produce Korean subtitles and videos
         run: |
           set -o pipefail
-          python .github/cobalt_invidious_runner.py 2>&1 | tee localization-run.log
+          python .github/local_cobalt_runner.py 2>&1 | tee localization-run.log
 
       - name: Show result files
         if: always()
@@ -70,7 +85,10 @@ jobs:
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' 2>/dev/null || true
           find work -maxdepth 2 -type f -printf 'work/%P %s bytes\n' 2>/dev/null | head -100 || true
           test -f output/localization_report.json && cat output/localization_report.json || true
-          tail -220 localization-run.log 2>/dev/null || true
+          tail -260 localization-run.log 2>/dev/null || true
+          echo '--- local cobalt logs ---'
+          docker logs local-cobalt 2>/dev/null | tail -160 || true
+          echo '--- PO token logs ---'
           docker logs bgutil-provider 2>/dev/null | tail -80 || true
 
       - name: Upload Korean localization package and diagnostics
