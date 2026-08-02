@@ -1,0 +1,2 @@
+ReadFresh Pages deployment probe.
+Created to trigger the Pages workflow after the workflow file was present.
